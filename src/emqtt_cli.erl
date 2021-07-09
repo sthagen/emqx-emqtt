@@ -44,6 +44,8 @@
           "retain in will message"},
          {enable_websocket, undefined, "enable-websocket", {boolean, false},
           "enable websocket transport or not"},
+         {enable_quic, undefined, "enable-quic", {boolean, false},
+          "enable quic transport or not"},
          {enable_ssl, undefined, "enable-ssl", {boolean, false},
           "enable ssl/tls or not"},
          {tls_version, undefined, "tls-version", {atom, 'tlsv1.2'},
@@ -66,6 +68,7 @@
         ] ++ ?HELP_OPT ++ ?CONN_LONG_OPTS ++
         [{payload, undefined, "payload", string,
           "application message that is being published"},
+         {file, undefined, "file", string, "file content to publish"},
          {repeat, undefined, "repeat", {integer, 1},
           "the number of times the message will be repeatedly published"},
          {repeat_delay, undefined, "repeat-delay", {integer, 0},
@@ -81,7 +84,9 @@
         [{retain_as_publish, undefined, "retain-as-publish", {boolean, false},
           "retain as publih option in subscription options"},
          {retain_handling, undefined, "retain-handling", {integer, 0},
-          "retain handling option in subscription options"}
+          "retain handling option in subscription options"},
+         {print, undefined, "print", string,
+          "'size' to print payload size, 'as-string' to print payload as string"}
         ]).
 
 main(["sub" | Argv]) ->
@@ -93,19 +98,33 @@ main(["sub" | Argv]) ->
 main(["pub" | Argv]) ->
     {ok, {Opts, _Args}} = getopt:parse(?PUB_OPTS, Argv),
     ok = maybe_help(pub, Opts),
-    ok = check_required_args(pub, [topic, payload], Opts),
+    ok = check_required_args(pub, [topic], Opts),
+    Payload = get_value(payload, Opts),
+    File = get_value(file, Opts),
+    case {Payload, File} of
+        {undefined, undefined} ->
+            io:format("Error: missing --payload or --file~n"),
+            halt(1);
+        _ ->
+            ok
+    end,
     main(pub, Opts);
 
 main(_Argv) ->
     io:format("Usage: ~s pub | sub [--help]~n", [?CMD_NAME]).
 
-main(PubSub, Opts) ->
+main(PubSub, Opts0) ->
+    application:ensure_all_started(quicer),
     application:ensure_all_started(emqtt),
+    Print = proplists:get_value(print, Opts0),
+    Opts = proplists:delete(print, Opts0),
     NOpts = enrich_opts(parse_cmd_opts(Opts)),
     {ok, Client} = emqtt:start_link(NOpts),
-    ConnRet = case proplists:get_bool(enable_websocket, NOpts) of
-                  true  -> emqtt:ws_connect(Client);
-                  false -> emqtt:connect(Client)
+    ConnRet = case {proplists:get_bool(enable_websocket, NOpts),
+                    proplists:get_bool(enable_quic, NOpts)} of
+                  {false, false} -> emqtt:connect(Client);
+                  {true, false}  -> emqtt:ws_connect(Client);
+                  {false, true}  -> emqtt:quic_connect(Client)
               end,
     case ConnRet of
         {ok, Properties} ->
@@ -118,7 +137,7 @@ main(PubSub, Opts) ->
                     subscribe(Client, NOpts),
                     KeepAlive = maps:get('Server-Keep-Alive', Properties, get_value(keepalive, NOpts)) * 1000,
                     timer:send_interval(KeepAlive, ping),
-                    receive_loop(Client)
+                    receive_loop(Client, Print)
             end;
         {error, Reason} ->
             io:format("Client ~s failed to sent CONNECT due to ~p~n", [get_value(clientid, NOpts), Reason])
@@ -135,7 +154,21 @@ publish(Client, Opts, Repeat) ->
     publish(Client, Opts, Repeat - 1).
 
 do_publish(Client, Opts) ->
-    case emqtt:publish(Client, get_value(topic, Opts), get_value(payload, Opts), Opts) of
+    case get_value(payload, Opts) of
+        undefined ->
+            File = get_value(file, Opts),
+            case file:read_file(File) of
+                {ok, Bin} -> do_publish(Client, Opts, Bin);
+                {error, Reason} ->
+                    io:format("Error: failed_to_read ~s:~nreason=~p", [File, Reason]),
+                    halt(1)
+            end;
+        Bin ->
+            do_publish(Client, Opts, Bin)
+    end.
+
+do_publish(Client, Opts, Payload) ->
+    case emqtt:publish(Client, get_value(topic, Opts), Payload, Opts) of
         {error, Reason} ->
             io:format("Client ~s failed to sent PUBLISH due to ~p~n", [get_value(clientid, Opts), Reason]);
         {error, _PacketId, Reason} ->
@@ -146,7 +179,7 @@ do_publish(Client, Opts) ->
                        get_value(qos, Opts),
                        i(get_value(retain, Opts)),
                        get_value(topic, Opts),
-                       length(binary_to_list(get_value(payload, Opts)))])
+                       iolist_size(Payload)])
     end.
 
 subscribe(Client, Opts) ->
@@ -245,6 +278,8 @@ parse_cmd_opts([{keepalive, I} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{keepalive, I} | Acc]);
 parse_cmd_opts([{enable_websocket, Enable} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{enable_websocket, Enable} | Acc]);
+parse_cmd_opts([{enable_quic, Enable} | Opts], Acc) ->
+    parse_cmd_opts(Opts, [{enable_quic, Enable} | Acc]);
 parse_cmd_opts([{enable_ssl, Enable} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{ssl, Enable} | Acc]);
 parse_cmd_opts([{tls_version, Version} | Opts], Acc) 
@@ -269,10 +304,15 @@ parse_cmd_opts([{topic, Topic} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{topic, list_to_binary(Topic)} | Acc]);
 parse_cmd_opts([{payload, Payload} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{payload, list_to_binary(Payload)} | Acc]);
+parse_cmd_opts([{file, File} | Opts], Acc) ->
+    parse_cmd_opts(Opts, [{file, File} | Acc]);
 parse_cmd_opts([{repeat, Repeat} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{repeat, Repeat} | Acc]);
 parse_cmd_opts([{repeat_delay, RepeatDelay} | Opts], Acc) ->
     parse_cmd_opts(Opts, [{repeat_delay, RepeatDelay} | Acc]);
+parse_cmd_opts([{print, WhatToPrint} | Opts], Acc) ->
+    parse_cmd_opts(Opts, [{print, WhatToPrint} | Acc]);
+
 parse_cmd_opts([_ | Opts], Acc) ->
     parse_cmd_opts(Opts, Acc).
 
@@ -311,16 +351,19 @@ pipeline([], Input) ->
 pipeline([Fun|More], Input) ->
     pipeline(More, erlang:apply(Fun, [Input])).
 
-receive_loop(Client) ->
+receive_loop(Client, Print) ->
     receive
         {publish, #{payload := Payload}} ->
-            io:format("~s~n", [Payload]),
-            receive_loop(Client);
+            case Print of
+                "size" -> io:format("received ~p bytes~n", [size(Payload)]);
+                _ -> io:format("~s~n", [Payload])
+            end,
+            receive_loop(Client, Print);
         ping ->
             emqtt:ping(Client),
-            receive_loop(Client);
+            receive_loop(Client, Print);
         _Other ->
-            receive_loop(Client)
+            receive_loop(Client, Print)
     end.
 
 i(true)  -> 1;

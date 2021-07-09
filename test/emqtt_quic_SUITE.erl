@@ -1,5 +1,5 @@
 %%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%% Copyright (c) 2021 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -13,8 +13,7 @@
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
 %%--------------------------------------------------------------------
-
--module(emqtt_sock_SUITE).
+-module(emqtt_quic_SUITE).
 
 -compile(export_all).
 -compile(nowarn_export_all).
@@ -23,35 +22,41 @@
 
 all() -> emqx_ct:all(?MODULE).
 
-%%--------------------------------------------------------------------
-%% Test cases
-%%--------------------------------------------------------------------
+init_per_suite(Config) ->
+    application:ensure_all_started(quicer),
+    Config.
 
-t_tcp_sock(_) ->
-    Server = tcp_server:start_link(4000),
-    {ok, Sock} = emqtt_sock:connect("127.0.0.1", 4000, [], 3000),
-    send_and_recv_with(Sock),
-    ok = emqtt_sock:close(Sock),
-    ok = tcp_server:stop(Server).
+end_per_suite(_) ->
+    ok.
 
-t_ssl_sock(Config) ->
-    SslOpts = [{certfile, certfile(Config)},
-               {keyfile,  keyfile(Config)}
+t_quic_sock(Config) ->
+    Port = 4567,
+    SslOpts = [ {cert, certfile(Config)}
+              , {key,  keyfile(Config)}
+              , {idle_timeout_ms, 10000}
+              , {server_resumption_level, 2} % QUIC_SERVER_RESUME_AND_ZERORTT
+              , {peer_bidi_stream_count, 10}
+              , {alpn, ["mqtt"]}
               ],
-    Server = ssl_server:start_link(4443, SslOpts),
-    {ok, Sock} = emqtt_sock:connect("127.0.0.1", 4443, [{ssl_opts, []}], 3000),
+    Server = quic_server:start_link(Port, SslOpts),
+    timer:sleep(500),
+    {ok, Sock} = emqtt_quic:connect("localhost",
+                                    Port,
+                                    [{alpn, ["mqtt"]}, {active, false}],
+                                    3000),
     send_and_recv_with(Sock),
-    ok = emqtt_sock:close(Sock),
-    ssl_server:stop(Server).
+    ok = emqtt_quic:close(Sock),
+    quic_server:stop(Server).
 
 send_and_recv_with(Sock) ->
-    {ok, [{send_cnt, SendCnt}, {recv_cnt, RecvCnt}]} = emqtt_sock:getstat(Sock, [send_cnt, recv_cnt]),
-    {ok, {{127,0,0,1}, _}} = emqtt_sock:sockname(Sock),
-    ok = emqtt_sock:send(Sock, <<"hi">>),
-    {ok, <<"hi">>} = emqtt_sock:recv(Sock, 0),
-    ok = emqtt_sock:setopts(Sock, [{active, 100}]),
-    {ok, Stats} = emqtt_sock:getstat(Sock, [send_cnt, recv_cnt]),
-    Stats = [{send_cnt, SendCnt + 1}, {recv_cnt, RecvCnt + 1}].
+    {ok, {IP, _}} = emqtt_quic:sockname(Sock),
+    ?assert(lists:member(tuple_size(IP), [4, 8])),
+    ok = emqtt_quic:send(Sock, <<"ping">>),
+    {ok, <<"pong">>} = emqtt_quic:recv(Sock, 0),
+    ok = emqtt_quic:setopts(Sock, [{active, 100}]),
+    {ok, Stats} = emqtt_quic:getstat(Sock, [send_cnt, recv_cnt]),
+    %% connection level counters, not stream level
+    [{send_cnt, _}, {recv_cnt, _}] = Stats.
 
 %%--------------------------------------------------------------------
 %% Helper functions

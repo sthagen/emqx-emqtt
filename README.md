@@ -52,10 +52,12 @@ A long option can have the following syntax:
             [--will-qos [<will_qos>]]
             [--will-retain [<will_retain>]]
             [--enable-websocket [<enable_websocket>]]
+            [--enable-quic [<enable_quic>]]
             [--enable-ssl [<enable_ssl>]]
             [--tls-version [<tls_version>]]
-            [--CAfile <cafile>] [--cert <cert>]
-            [--key <key>] [--payload <payload>]
+            [--CAfile <cafile>] [--cert <cert>] [--key <key>]
+            [--payload <payload>]
+            [--file <path/to/file>]
             [--repeat [<repeat>]]
             [--repeat-delay [<repeat_delay>]]
 ```
@@ -138,6 +140,11 @@ A long option can have the following syntax:
 
 &ensp;&ensp;Specify enable WebSocket transport or not. This option can't be used with `--enable-ssl` currently.
 
+<span id="enable-quic">**`--enable-quic`**</span>
+
+&ensp;&ensp;Use quic as transport. This option can't be combined with `--enable-ssl` or `--enable-websocket`
+
+
 <span id="enable-ssl">**`--enable-ssl`**</span>
 
 &ensp;&ensp;Specify enable SSL/TLS transport or not. This option can't be used with `--enable-websocket` currently.
@@ -201,12 +208,14 @@ Client emqtt-zhouzibodeMacBook-Pro-1e4677ab46cecf1298ac sent DISCONNECT
             [--will-qos [<will_qos>]]
             [--will-retain [<will_retain>]]
             [--enable-websocket [<enable_websocket>]]
+            [--enable-quic [<enable_quic>]]            
             [--enable-ssl [<enable_ssl>]]
             [--tls-version [<tls_version>]]
             [--CAfile <cafile>] [--cert <cert>]
             [--key <key>]
             [--retain-as-publish [<retain_as_publish>]]
             [--retain-handling [<retain_handling>]]
+            [--print [size]]
 ```
 
 #### Options
@@ -259,6 +268,11 @@ Client emqtt-zhouzibodeMacBook-Pro-1e4677ab46cecf1298ac sent DISCONNECT
 
 &ensp;&ensp;Specify the Retain Handling option in subscription options. Defaults to 0.
 
+**`--print`**
+
+&ensp;&ensp;Use `size` to pinrt just the number of received payload bytes. Payload is printed as string if this option is not sepcified.
+
+
 **`--will-topic`**
 
 &ensp;&ensp;See also [--will-topic](#will-topic).
@@ -278,6 +292,10 @@ Client emqtt-zhouzibodeMacBook-Pro-1e4677ab46cecf1298ac sent DISCONNECT
 **`--enable-websocket`**
 
 &ensp;&ensp;See also [--enable-websocket](#enable-websocket).
+
+**`--enable-quic`**
+
+&ensp;&ensp;See also [--enable-quic](#enable-quic).
 
 **`--enable-ssl`**
 
