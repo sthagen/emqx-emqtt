@@ -1,5 +1,5 @@
-%%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%%-------------------------------------------------------------------------
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
-%%--------------------------------------------------------------------
+%%-------------------------------------------------------------------------
 
 -module(emqtt_sock).
 
@@ -50,18 +50,19 @@ connect(Host, Port, SockOpts, Timeout) ->
         {ok, Sock} ->
             case lists:keyfind(ssl_opts, 1, SockOpts) of
                 {ssl_opts, SslOpts} ->
-                    ssl_upgrade(Sock, SslOpts, Timeout);
+                    ssl_upgrade(Host, Sock, SslOpts, Timeout);
                 false -> {ok, Sock}
             end;
         {error, Reason} ->
             {error, Reason}
     end.
 
-ssl_upgrade(Sock, SslOpts, Timeout) ->
+ssl_upgrade(Host, Sock, SslOpts, Timeout) ->
     TlsVersions = proplists:get_value(versions, SslOpts, []),
     Ciphers = proplists:get_value(ciphers, SslOpts, default_ciphers(TlsVersions)),
     SslOpts2 = merge_opts(SslOpts, [{ciphers, Ciphers}]),
-    case ssl:connect(Sock, SslOpts2, Timeout) of
+    SslOpts3 = apply_sni(SslOpts2, Host),
+    case ssl:connect(Sock, SslOpts3, Timeout) of
         {ok, SslSock} ->
             ok = ssl:controlling_process(SslSock, self()),
             {ok, #ssl_socket{tcp = Sock, ssl = SslSock}};
@@ -136,3 +137,13 @@ default_ciphers(TlsVersions) ->
             Ciphers ++ ssl:cipher_suites(all, TlsVer)
         end, [], TlsVersions).
 
+apply_sni(Opts, Host) ->
+    case lists:keyfind(server_name_indication, 1, Opts) of
+        {_, SNI} when SNI =:= "true" orelse
+                      SNI =:= <<"true">> orelse
+                      SNI =:= true ->
+            lists:keystore(server_name_indication, 1, Opts,
+                           {server_name_indication, Host});
+        _ ->
+            Opts
+    end.

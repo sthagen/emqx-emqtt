@@ -27,9 +27,11 @@ jobs:
             submodules: recursive
         - name: Run tests
           run: |
+            set -e
             make eunit
             make ct
             make cover
+            make relup-test
         - uses: actions/upload-artifact@v1
           if: always()
           with:

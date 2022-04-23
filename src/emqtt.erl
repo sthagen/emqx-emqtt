@@ -1,5 +1,5 @@
-%%--------------------------------------------------------------------
-%% Copyright (c) 2020 EMQ Technologies Co., Ltd. All Rights Reserved.
+%%-------------------------------------------------------------------------
+%% Copyright (c) 2020-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -12,13 +12,14 @@
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
-%%--------------------------------------------------------------------
+%%-------------------------------------------------------------------------
 
 -module(emqtt).
 
 -behaviour(gen_statem).
 
 -include("emqtt.hrl").
+-include("logger.hrl").
 
 -export([ start_link/0
         , start_link/1
@@ -73,6 +74,7 @@
 -export([ initialized/3
         , waiting_for_connack/3
         , connected/3
+        , reconnect/3
         , inflight_full/3
         , random_client_id/0
         , reason_code_name/1
@@ -85,6 +87,9 @@
         , code_change/4
         ]).
 
+-ifdef(UPGRADE_TEST_CHEAT).
+-export([format_status/2]).
+-endif.
 
 -export_type([ host/0
              , option/0
@@ -138,6 +143,7 @@
                 | {ack_timeout, pos_integer()}
                 | {force_ping, boolean()}
                 | {low_mem, boolean()}
+                | {reconnect, boolean()}
                 | {properties, properties()}).
 
 -type(maybe(T) :: undefined | T).
@@ -168,6 +174,7 @@
 -type(client() :: pid() | atom()).
 
 -opaque(mqtt_msg() :: #mqtt_msg{}).
+
 
 -record(state, {
           name            :: atom(),
@@ -207,8 +214,9 @@
           session_present :: boolean(),
           last_packet_id  :: packet_id(),
           low_mem         :: boolean(),
-          parse_state     :: emqtt_frame:parse_state()
-         }).
+          parse_state     :: emqtt_frame:parse_state(),
+          reconnect       :: boolean()
+         }). %% note, always add the new fields at the tail for code_change.
 
 -record(call, {id, from, req, ts}).
 
@@ -230,10 +238,8 @@
 
 -define(NO_CLIENT_ID, <<>>).
 
--define(LOG(Level, Format, Args, State),
-        begin
-          (logger:log(Level, #{}, #{report_cb => fun(_) -> {"emqtt(~s): "++(Format), ([State#state.clientid|Args])} end}))
-        end).
+-define(LOG(Level, Msg, Meta, State),
+        ?SLOG(Level, Meta#{msg => Msg, clietntid => State#state.clientid}, #{})).
 
 %%--------------------------------------------------------------------
 %% API
@@ -500,6 +506,7 @@ init([Options]) ->
                                  retry_interval  = ?DEFAULT_RETRY_INTERVAL,
                                  connect_timeout = ?DEFAULT_CONNECT_TIMEOUT,
                                  low_mem         = false,
+                                 reconnect       = false,
                                  last_packet_id  = 1
                                 }),
     {ok, initialized, init_parse_state(State)}.
@@ -609,6 +616,8 @@ init([{retry_interval, I} | Opts], State) ->
     init(Opts, State#state{retry_interval = timer:seconds(I)});
 init([{bridge_mode, Mode} | Opts], State) when is_boolean(Mode) ->
     init(Opts, State#state{bridge_mode = Mode});
+init([{reconnect, IsReconnect} | Opts], State) when is_boolean(IsReconnect) ->
+    init(Opts, State#state{reconnect = IsReconnect});
 init([{low_mem, IsLow} | Opts], State) when is_boolean(IsLow) ->
     init(Opts, State#state{low_mem = IsLow});
 init([_Opt | Opts], State) ->
@@ -641,23 +650,29 @@ merge_opts(Defaults, Options) ->
 
 callback_mode() -> state_functions.
 
-initialized({call, From}, {connect, ConnMod}, State = #state{sock_opts = SockOpts,
-                                                             connect_timeout = Timeout}) ->
-    case sock_connect(ConnMod, hosts(State), SockOpts, Timeout) of
-        {ok, Sock} ->
-            case mqtt_connect(run_sock(State#state{conn_mod = ConnMod, socket = Sock})) of
-                {ok, NewState} ->
-                    {next_state, waiting_for_connack,
-                     add_call(new_call(connect, From), NewState), [Timeout]};
-                Error = {error, Reason} ->
-                    {stop_and_reply, Reason, [{reply, From, Error}]}
-            end;
-        Error = {error, Reason} ->
+initialized({call, From}, {connect, ConnMod}, State) ->
+    case do_connect(ConnMod, State) of
+        {ok, #state{connect_timeout = Timeout} = NewState} ->
+            {next_state, waiting_for_connack,
+             add_call(new_call(connect, From), NewState), [Timeout]};
+        {error, Reason} = Error->
+            {stop_and_reply, Reason, [{reply, From, Error}]};
+        {sock_error, Reason} ->
+            Error = {error, Reason},
             {stop_and_reply, {shutdown, Reason}, [{reply, From, Error}]}
     end;
 
 initialized(EventType, EventContent, State) ->
     handle_event(EventType, EventContent, initialized, State).
+
+do_connect(ConnMod, #state{sock_opts = SockOpts,
+                           connect_timeout = Timeout} = State) ->
+    case sock_connect(ConnMod, hosts(State), SockOpts, Timeout) of
+        {ok, Sock} ->
+            mqtt_connect(run_sock(State#state{conn_mod = ConnMod, socket = Sock}));
+        {error, Reason} ->
+            {sock_error, Reason}
+    end.
 
 mqtt_connect(State = #state{clientid    = ClientId,
                             clean_start = CleanStart,
@@ -689,6 +704,19 @@ mqtt_connect(State = #state{clientid    = ClientId,
                                  username     = Username,
                                  password     = Password}), State).
 
+reconnect('state_timeout',  NextTimeout, #state{conn_mod = CMod} = State) ->
+    case do_connect(CMod, State#state{clean_start = false}) of
+        {ok, #state{connect_timeout = Timeout} = NewState} ->
+            {next_state, waiting_for_connack,
+             add_call(new_call(connect, self()), NewState), [Timeout]};
+        _Err ->
+            {keep_state_and_data, {'state_timeout', NextTimeout, NextTimeout*2}}
+    end;
+reconnect({call, From}, stop, _State) ->
+    {stop_and_reply, normal, [{reply, From, ok}]};
+reconnect(_EventType, _, _State) ->
+    {keep_state_and_data, postpone}.
+
 waiting_for_connack(cast, ?CONNACK_PACKET(?RC_SUCCESS,
                                           SessPresent,
                                           Properties),
@@ -704,8 +732,13 @@ waiting_for_connack(cast, ?CONNACK_PACKET(?RC_SUCCESS,
             State2 = State1#state{clientid = assign_id(ClientId, AllProps1),
                                   properties = AllProps1,
                                   session_present = SessPresent},
-            {next_state, connected, ensure_keepalive_timer(State2),
-             [{reply, From, Reply}]};
+            case self() == From of
+                true -> %% from reconnect
+                    {next_state, connected, ensure_keepalive_timer(State2)};
+                _ ->
+                    {next_state, connected, ensure_keepalive_timer(State2),
+                     [{reply, From, Reply}]}
+            end;
         false ->
             {stop, bad_connack}
     end;
@@ -721,6 +754,9 @@ waiting_for_connack(cast, ?CONNACK_PACKET(ReasonCode,
             {stop_and_reply, {shutdown, Reason}, [{reply, From, Reply}]};
         false -> {stop, connack_error}
     end;
+
+waiting_for_connack({call, _From}, Event, _State) when Event =/= stop ->
+    {keep_state_and_data, postpone};
 
 waiting_for_connack(timeout, _Timeout, State) ->
     case take_call(connect, State) of
@@ -852,16 +888,16 @@ connected(cast, Packet = ?PUBLISH_PACKET(?QOS_2, _PacketId), State) ->
 connected(cast, ?PUBACK_PACKET(_PacketId, _ReasonCode, _Properties) = PubAck, State) ->
     {keep_state, delete_inflight(PubAck, State)};
 
-connected(cast, ?PUBREC_PACKET(PacketId), State = #state{inflight = Inflight}) ->
+connected(cast, ?PUBREC_PACKET(PacketId, _ReasonCode), State = #state{inflight = Inflight}) ->
 	NState = case maps:find(PacketId, Inflight) of
 				 {ok, {publish, _Msg, _Ts}} ->
 					 Inflight1 = maps:put(PacketId, {pubrel, PacketId, os:timestamp()}, Inflight),
 					 State#state{inflight = Inflight1};
 				 {ok, {pubrel, _Ref, _Ts}} ->
-					 ?LOG(notice, "Duplicated PUBREC Packet: ~p", [PacketId], State),
+					 ?LOG(notice, "duplicated_PUBREC_packet", #{packet_id => PacketId}, State),
 					 State;
 				 error ->
-					 ?LOG(warning, "Unexpected PUBREC Packet: ~p", [PacketId], State),
+					 ?LOG(warning, "unexpected_PUBREC_packet", #{packet_id => PacketId}, State),
 					 State
 			 end,
     send_puback(?PUBREL_PACKET(PacketId), NState);
@@ -877,7 +913,7 @@ connected(cast, ?PUBREL_PACKET(PacketId),
                  false -> {keep_state, NewState}
              end;
          error ->
-             ?LOG(warning, "Unexpected PUBREL: ~p", [PacketId], State),
+             ?LOG(warning, "unexpected_PUBREL", #{packet_id => PacketId}, State),
              keep_state_and_data
      end;
 
@@ -976,76 +1012,122 @@ inflight_full(EventType, EventContent, Data) ->
     %% delegate all other events to connected state.
     connected(EventType, EventContent, Data).
 
+
 handle_event({call, From}, stop, _StateName, _State) ->
     {stop_and_reply, normal, [{reply, From, ok}]};
 
 handle_event(info, {gun_ws, ConnPid, _StreamRef, {binary, Data}},
              _StateName, State = #state{socket = ConnPid}) ->
-    ?LOG(debug, "RECV Data: ~p", [Data], State),
+    ?LOG(debug, "RECV_Data", #{data => Data}, State),
     process_incoming(iolist_to_binary(Data), [], State);
 
 handle_event(info, {gun_down, ConnPid, _, Reason, _, _},
              _StateName, State = #state{socket = ConnPid}) ->
-    ?LOG(debug, "WebSocket down! Reason: ~p", [Reason], State),
+    ?LOG(debug, "webSocket_down", #{reason => Reason}, State),
     {stop, Reason, State};
 
 handle_event(info, {TcpOrSsL, _Sock, Data}, _StateName, State)
     when TcpOrSsL =:= tcp; TcpOrSsL =:= ssl ->
-    ?LOG(debug, "RECV Data: ~p", [Data], State),
+    ?LOG(debug, "RECV_Data", #{data => Data}, State),
     process_incoming(Data, [], run_sock(State));
 
 handle_event(info, {quic, Data, _Stream, _, _, _}, _StateName, State) ->
-    ?LOG(debug, "RECV Data: ~p", [Data], State),
+    ?LOG(debug, "RECV_Data", #{data => Data}, State),
     process_incoming(Data, [], run_sock(State));
+
+handle_event(info, {Error, Sock, Reason}, connected,
+             #state{ reconnect = true } = State)
+    when Error =:= tcp_error; Error =:= ssl_error ->
+    ?LOG(error, "reconnect_due_to_connection_error",
+         #{error => Error, reason => Reason}, State),
+    case Error of
+        tcp_error -> gen_tcp:close(Sock);
+        ssl_error -> ssl:close(Sock)
+    end,
+    next_reconnect(State);
 
 handle_event(info, {Error, _Sock, Reason}, _StateName, State)
     when Error =:= tcp_error; Error =:= ssl_error ->
-    ?LOG(error, "The connection error occured ~p, reason:~p",
-	 [Error, Reason], State),
+    ?LOG(error, "connection_error",
+         #{error => Error, reason =>Reason}, State),
     {stop, {shutdown, Reason}, State};
+
+handle_event(info, {Closed, _Sock}, connected, #state{ reconnect = true } = State)
+    when Closed =:= tcp_closed; Closed =:= ssl_closed ->
+    next_reconnect(State);
 
 handle_event(info, {Closed, _Sock}, _StateName, State)
     when Closed =:= tcp_closed; Closed =:= ssl_closed ->
-    ?LOG(debug, "~p", [Closed], State),
+    ?LOG(debug, "socket_closed", #{event => Closed}, State),
     {stop, {shutdown, Closed}, State};
 
 handle_event(info, {'EXIT', Owner, Reason}, _, State = #state{owner = Owner}) ->
-    ?LOG(debug, "Got EXIT from owner, Reason: ~p", [Reason], State),
+    ?LOG(debug, "EXIT_from_owner", #{reason => Reason}, State),
     {stop, {shutdown, Reason}, State};
 
 handle_event(info, {inet_reply, _Sock, ok}, _, _State) ->
     keep_state_and_data;
 
 handle_event(info, {inet_reply, _Sock, {error, Reason}}, _, State) ->
-    ?LOG(error, "Got tcp error: ~p", [Reason], State),
+    ?LOG(error, "tcp_error", #{ reason => Reason}, State),
     {stop, {shutdown, Reason}, State};
 
 handle_event(info, {quic, transport_shutdown, _Stream, Reason}, _, State) ->
     %% This is just a notify, we can wait for close complete
-    ?LOG(error, "QUIC: transport shutdown: ~p", [Reason], State),
+    ?LOG(error, "QUIC_transport_shutdown", #{rason => Reason}, State),
     keep_state_and_data;
 
-handle_event(info, {quic, closed, _Stream, Reason}, _, State) ->
-    ?LOG(error, "QUIC: transport closed: ~p", [Reason], State),
+handle_event(info, {quic, closed, _Stream, Reason}, connected, State) ->
+    ?LOG(error, "QUIC_stream_closed", #{reason => Reason}, State),
     {stop, {shutdown, {closed, Reason}}, State};
 
-handle_event(info, {quic, closed, _Stream}, _, State) ->
-    ?LOG(error, "QUIC: stream closed", [], State),
+handle_event(info, {quic, shutdown, _Stream}, _, #state{reconnect = true} = State) ->
+    next_reconnect(State);
+
+handle_event(info, {quic, shutdown, _Stream}, _, State) ->
+    ?LOG(error, "QUIC_peer_conn_shutdown", #{}, State),
     {stop, {shutdown, closed}, State};
+
+handle_event(info, {quic, closed, _Stream}, _, State) ->
+    ?LOG(error, "QUIC_stream_closed", #{}, State),
+    keep_state_and_data;
 
 handle_event(info, {quic, peer_send_shutdown, _Stream}, _, State) ->
-    ?LOG(error, "QUIC: peer send shutdown", [], State),
+    ?LOG(error, "QUIC_peer_send_shutdown", #{}, State),
     {stop, {shutdown, closed}, State};
 
-handle_event(info, EventContent = {'EXIT', _Pid, normal}, StateName, State) ->
-    ?LOG(info, "State: ~s, Unexpected Event: (info, ~p)",
-         [StateName, EventContent], State),
+handle_event(info, EventContent = {'EXIT', Pid, normal}, StateName, State) ->
+    ?LOG(info, "unexpected_EXIT_ignored", #{pid => Pid, state => StateName}, State),
     keep_state_and_data;
 
 handle_event(EventType, EventContent, StateName, State) ->
-    ?LOG(error, "State: ~s, Unexpected Event: (~p, ~p)",
-         [StateName, EventType, EventContent], State),
-    keep_state_and_data.
+    case maybe_upgrade_test_cheat(EventType, EventContent, StateName, State) of
+        skip ->
+            ?LOG(error, "unexpected_event",
+                 #{state => StateName,
+                   event_type => EventType,
+                   event => EventContent}, State),
+            keep_state_and_data;
+        Other ->
+            Other
+    end.
+
+-ifdef(UPGRADE_TEST_CHEAT).
+%% Cheat release manager that I am the target process for code change.
+%% example
+%% {ok, Pid}=emqtt:start_link().
+%% ets:insert(ac_tab,{{application_master, emqtt}, Pid}).
+%% release_handler_1:get_supervised_procs().
+maybe_upgrade_test_cheat(info, {get_child, Ref, From}, _StateName, _State) ->
+    From ! {Ref, {self(), ?MODULE}},
+    keep_state_and_data;
+maybe_upgrade_test_cheat({call, From}, which_children, _StateName, _State) ->
+    {keep_state_and_data, {reply, From, []}}.
+-else.
+maybe_upgrade_test_cheat(_, _, _, _) ->
+    skip.
+-endif.
+
 
 %% Mandatory callback functions
 terminate(Reason, _StateName, State = #state{conn_mod = ConnMod, socket = Socket}) ->
@@ -1061,8 +1143,23 @@ terminate(Reason, _StateName, State = #state{conn_mod = ConnMod, socket = Socket
         _ -> ConnMod:close(Socket)
     end.
 
-code_change(_Vsn, State, Data, _Extra) ->
-    {ok, State, Data}.
+%% Downgrade
+code_change({down, _OldVsn}, OldState, OldData, _Extra) ->
+    Tmp = tuple_to_list(OldData),
+    NewData = list_to_tuple(lists:sublist(Tmp, length(Tmp) -1)),
+    {ok, OldState, NewData};
+
+code_change(_OldVsn, OldState, #state{} = OldData, _Extra) ->
+    {ok, OldState, OldData};
+code_change(_OldVsn, OldState, OldData, _Extra) ->
+    NewData = list_to_tuple(tuple_to_list(OldData) ++ [false]),
+    {ok, OldState, NewData}.
+
+-ifdef(UPGRADE_TEST_CHEAT).
+format_status(_, State) ->
+    [{data, [{"State", State}]},
+     {supervisor, [{"Callback", ?MODULE}]}].
+-endif.
 
 %%--------------------------------------------------------------------
 %% Internal functions
@@ -1098,7 +1195,7 @@ delete_inflight(?PUBACK_PACKET(PacketId, ReasonCode, Properties),
                                                    properties  => Properties}),
             State#state{inflight = maps:remove(PacketId, Inflight)};
         error ->
-            ?LOG(warning, "Unexpected PUBACK: ~p", [PacketId], State),
+            ?LOG(warning, "unexpected_PUBACK", #{packet_id => PacketId}, State),
             State
     end;
 delete_inflight(?PUBCOMP_PACKET(PacketId, ReasonCode, Properties),
@@ -1110,7 +1207,7 @@ delete_inflight(?PUBCOMP_PACKET(PacketId, ReasonCode, Properties),
                                                    properties  => Properties}),
             State#state{inflight = maps:remove(PacketId, Inflight)};
         error ->
-            ?LOG(warning, "Unexpected PUBCOMP Packet: ~p", [PacketId], State),
+            ?LOG(warning, "unexpected_PUBCOMP", #{packet_id => PacketId}, State),
             State
      end.
 
@@ -1329,7 +1426,7 @@ send(Msg, State) when is_record(Msg, mqtt_msg) ->
 send(Packet, State = #state{conn_mod = ConnMod, socket = Sock, proto_ver = Ver})
     when is_record(Packet, mqtt_packet) ->
     Data = emqtt_frame:serialize(Packet, Ver),
-    ?LOG(debug, "SEND Data: ~1000p", [Packet], State),
+    ?LOG(debug, "SEND_Data", #{packet => Packet}, State),
     case ConnMod:send(Sock, Data) of
         ok  -> {ok, bump_last_packet_id(State)};
         Error -> Error
@@ -1428,3 +1525,8 @@ reason_code_name(16#A0) -> maximum_connect_time;
 reason_code_name(16#A1) -> subscription_identifiers_not_supported;
 reason_code_name(16#A2) -> wildcard_subscriptions_not_supported;
 reason_code_name(_Code) -> unknown_error.
+
+
+next_reconnect(#state{connect_timeout = Timeout} = State) ->
+    {next_state, reconnect, State#state{connect_timeout = Timeout, clean_start = false},
+     {'state_timeout', Timeout, Timeout*2}}.

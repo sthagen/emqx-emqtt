@@ -1,5 +1,5 @@
-%%--------------------------------------------------------------------
-%% Copyright (c) 2021 EMQ Technologies Co., Ltd. All Rights Reserved.
+%%-------------------------------------------------------------------------
+%% Copyright (c) 2021-2022 EMQ Technologies Co., Ltd. All Rights Reserved.
 %%
 %% Licensed under the Apache License, Version 2.0 (the "License");
 %% you may not use this file except in compliance with the License.
@@ -12,7 +12,7 @@
 %% WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 %% See the License for the specific language governing permissions and
 %% limitations under the License.
-%%--------------------------------------------------------------------
+%%-------------------------------------------------------------------------
 
 -module(emqtt_quic).
 
@@ -39,7 +39,9 @@ connect(Host, Port, Opts, Timeout) ->
         {ok, Conn} ->
             quicer:start_stream(Conn, [{active, false}]);
         {error, transport_down, Reason} ->
-            {error, {transport_down, Reason}}
+            {error, {transport_down, Reason}};
+        {error, _} = Error ->
+            Error
     end.
 
 send(Stream, IoData) when is_list(IoData) ->
