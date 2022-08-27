@@ -40,6 +40,8 @@ ct: compile
 cover:
 	$(REBAR) cover
 
+test: eunit ct cover
+
 dialyzer:
 	$(REBAR) dialyzer
 
