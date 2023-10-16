@@ -48,6 +48,7 @@ groups() ->
                            ]}
     , {client_verify_peer, [gen_connect_test]}
     , {client_verify_none, [gen_connect_test]}
+    , {tlsv13, [tlsv13_connect_test]}
     ].
 
 init_per_group(all, Config) ->
@@ -155,6 +156,13 @@ init_per_testcase(gen_connect_test, Config) ->
                     end}
     , {expect_pass, IsPass}
      | Config];
+init_per_testcase(tlsv13_connect_test, Config) ->
+    ServerFiles = ?config(common_server_cert_files, Config),
+    ClientFiles = ?config(known_client_cert_files , Config),
+    [ {server_ssl_opts, [{verify, verify_peer}, {versions, ['tlsv1.3']} | ServerFiles]}
+    , {client_ssl_opts, [{verify, verify_peer}, {versions, ['tlsv1.3']} | ClientFiles]}
+    , {target_host, "localhost"}
+     | Config];
 init_per_testcase(_, Config) ->
     Config.
 
@@ -171,10 +179,11 @@ t_tcp_sock(_) ->
 
 t_ssl_sock(Config) ->
     SslOpts = [{certfile, certfile(Config)},
-               {keyfile,  keyfile(Config)}
+               {keyfile, keyfile(Config)},
+               {verify, verify_none}
               ],
     {Server, _} = ssl_server:start_link(4443, SslOpts),
-    {ok, Sock} = emqtt_sock:connect("127.0.0.1", 4443, [{ssl_opts, []}], 3000),
+    {ok, Sock} = emqtt_sock:connect("127.0.0.1", 4443, [{ssl_opts, [{verify, verify_none}]}], 3000),
     send_and_recv_with(Sock),
     ok = emqtt_sock:close(Sock),
     ssl_server:stop(Server).
@@ -211,14 +220,24 @@ send_and_recv_with(Sock) ->
     {ok, Stats} = emqtt_sock:getstat(Sock, [send_cnt, recv_cnt]),
     Stats = [{send_cnt, SendCnt + 1}, {recv_cnt, RecvCnt + 1}].
 
+tlsv13_connect_test(Config) ->
+    ServerSslOpts = ?config(server_ssl_opts, Config),
+    ClientSslOpts = ?config(client_ssl_opts, Config),
+    Port = 1024 + random:uniform(erlang:system_info(port_limit) - 1024),
+    {Server, _} = ssl_server:start_link(Port, ServerSslOpts),
+    {ok, Sock} = emqtt_sock:connect(?config(target_host, Config), Port, [{ssl_opts, ClientSslOpts}], 3000),
+    send_and_recv_with(Sock),
+    ok = emqtt_sock:close(Sock),
+    ssl_server:stop(Server).
+
 %%--------------------------------------------------------------------
 %% Helper functions
 %%--------------------------------------------------------------------
 certfile(Config) ->
-    filename:join([cert_dir(Config), "test.crt"]).
+    filename:join([cert_dir(Config), "localhost.pem"]).
 
 keyfile(Config) ->
-    filename:join([test_dir(Config), "certs", "test.key"]).
+    filename:join([cert_dir(Config), "localhost.key"]).
 
 cert_dir(Config) ->
     filename:join([test_dir(Config), "certs"]).
