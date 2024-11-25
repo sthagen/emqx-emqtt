@@ -1639,15 +1639,10 @@ handle_unknown_event(EventType, EventContent, StateName, State) ->
 
 %% Mandatory callback functions
 terminate(Reason, _StateName, State = #state{conn_mod = ConnMod, socket = Socket}) ->
-    reply_all_inflight_reqs(Reason, State),
-    ok = reply_all_pendings_reqs(Reason, State),
-    case Reason of
-        {disconnected, ReasonCode, Properties} ->
-            %% backward compatible
-            ok = eval_msg_handler(State, disconnected, {ReasonCode, Properties});
-        _ ->
-            ok = eval_msg_handler(State, disconnected, Reason)
-    end,
+    Reason1 = unwrap_shutdown(Reason),
+    ok = reply_all_inflight_reqs(Reason1, State),
+    ok = reply_all_pendings_reqs(Reason1, State),
+    ok = eval_msg_handler(State, disconnected, Reason1),
     ok = close_socket(ConnMod, Socket).
 
 %% Downgrade
@@ -2023,16 +2018,12 @@ deliver(_Via, {pubrel, Msg}, State) ->
     ok = eval_msg_handler(State, pubrel, Msg),
     State.
 
-%% no dialyzer warning because the second clause kept for compatibility
--dialyzer({nowarn_function, [eval_msg_handler/3]}).
-eval_msg_handler(#state{msg_handler = ?NO_HANDLER,
-                        owner = Owner},
-                 disconnected, {ReasonCode, Properties}) when is_integer(ReasonCode) ->
+eval_msg_handler(#state{msg_handler = ?NO_HANDLER, owner = Owner}, disconnected,
+        {disconnected, ReasonCode, Properties}) when is_integer(ReasonCode) ->
     %% Special handling for disconnected message when there is no handler callback
     Owner ! {disconnected, ReasonCode, Properties},
     ok;
-eval_msg_handler(#state{msg_handler = ?NO_HANDLER},
-                 disconnected, _OtherReason) ->
+eval_msg_handler(#state{msg_handler = ?NO_HANDLER}, disconnected, _OtherReason) ->
     %% do nothing to be backward compatible
     ok;
 eval_msg_handler(#state{msg_handler = ?NO_HANDLER,
@@ -2087,19 +2078,11 @@ maybe_reconnect(Reason, #state{reconnect = Re} = State) when ?NEED_RECONNECT(Re)
 maybe_reconnect(Reason, State) ->
     shutdown(Reason, State).
 
-shutdown(normal, State) ->
-    {stop, normal, State};
-shutdown({shutdown, _} = Reason, State) ->
-    {stop, Reason, State};
 shutdown(Reason, State) ->
-    {stop, {shutdown, Reason}, State}.
+    {stop, wrap_shutdown(Reason), State}.
 
-shutdown_reply(normal, From, Reply) ->
-    {stop_and_reply, normal, [{reply, From, Reply}]};
-shutdown_reply({shutdown, _} = Reason, From, Reply) ->
-    {stop_and_reply, Reason, [{reply, From, Reply}]};
 shutdown_reply(Reason, From, Reply) ->
-    {stop_and_reply, {shutdown, Reason}, [{reply, From, Reply}]}.
+    {stop_and_reply, wrap_shutdown(Reason), [{reply, From, Reply}]}.
 
 reply_all_inflight_reqs(Reason, #state{inflight = Inflight}) ->
     %% reply error to all pendings caller
@@ -2327,6 +2310,13 @@ prepare_reconnect(#state{
 
 next_retry_cnt(infinity) -> infinity;
 next_retry_cnt(Cnt) -> Cnt - 1.
+
+wrap_shutdown(normal) -> normal;
+wrap_shutdown({shutdown, _} = Reason) -> Reason;
+wrap_shutdown(Reason) -> {shutdown, Reason}.
+
+unwrap_shutdown({shutdown, Reason}) -> Reason;
+unwrap_shutdown(Reason) -> Reason.
 
 close_socket(_, undefined) ->
     ok;
