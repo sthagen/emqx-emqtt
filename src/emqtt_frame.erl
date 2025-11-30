@@ -85,7 +85,7 @@ initial_parse_state() ->
 initial_parse_state(Options) when is_map(Options) ->
     ?none(merge_opts(Options)).
 
-%% @pivate
+%% @private
 merge_opts(Options) ->
     maps:merge(?DEFAULT_OPTIONS, Options).
 

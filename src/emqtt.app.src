@@ -1,13 +1,13 @@
 {application, emqtt,
  [{description, "Erlang MQTT v5.0 Client"},
   {id, "emqtt"},
-  {vsn, {cmd, "git describe --tags --always"}},
+  {vsn, git},
   {modules, []},
   {registered, []},
   {applications, [kernel, stdlib, gun]},
+  {files, ["src", "include", "rebar.config", "rebar.config.script", "README.md", "LICENSE"]},
   {env, []},
   {licenses, ["Apache-2.0"]},
-  {maintainers, ["EMQX Team <contact@emqx.io>"]},
   {links, [{"Homepage", "https://emqx.io/"},
            {"Github", "https://github.com/emqx/emqtt"}
           ]}

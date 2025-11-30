@@ -24,3 +24,4 @@ rebar.lock
 emqtt.app.src
 emqtt_cli
 rebar3
+doc
