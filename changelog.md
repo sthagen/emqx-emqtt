@@ -1,3 +1,14 @@
+# 1.16.0
+
+- feat: add the `shuffle_hosts` option. When `true`, the `hosts` list is
+  shuffled before every connect attempt (including reconnects), so clients
+  with several brokers spread across them instead of all trying the first one.
+  Defaults to `false`, which keeps the configured order: first host primary,
+  the rest failover.
+- fix: try the `hosts` list in the configured order. `init/2` built the list
+  with a prepending fold, which reversed it, so `{hosts, [A, B]}` tried `B`
+  first. The first entry is now tried first, as the README has always stated.
+
 # 1.15.4
 
 - fix: return clean, typed error reasons from failed connect attempts.
