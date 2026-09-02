@@ -373,6 +373,7 @@ option() = {name, atom()} |
            {owner, pid()} |
            {host, host()} |
            {hosts, [{host(), inet:port_number()}]} |
+           {shuffle_hosts, boolean()} |
            {port, inet:port_number()} |
            {tcp_opts, [gen_tcp:option()]} |
            {ssl, boolean()} |
@@ -534,7 +535,11 @@ The host of the MQTT server to be connected. Host can be a hostname or an IP add
 
 `{hosts, [{Host, Port}]}`
 
-A list of hosts to connect to. If the connection to the first host fails, the client will try the next host in the list. If the connection to all hosts fails, the client will return an error. Setting this option will override the `host` option.
+A list of hosts to connect to. The hosts are tried in the given order: if the connection to the first host fails, the client will try the next host in the list. If the connection to all hosts fails, the client will return an error. Setting this option will override the `host` option.
+
+`{shuffle_hosts, boolean()}`
+
+When `true`, the `hosts` list is shuffled before every connect attempt, including reconnects, so clients spread across the listed hosts instead of all trying the first one. When `false`, the list is tried in the given order, so the first host acts as the primary and the rest as failover. Defaults to `false`.
 
 `{port, Port}`
 

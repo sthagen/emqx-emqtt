@@ -151,6 +151,8 @@
                 | {msg_handler, msg_handler()}
                 | {host, host()}
                 | {hosts, [{host(), inet:port_number()}]}
+                %% if true, the hosts list is shuffled before every connect attempt
+                | {shuffle_hosts, boolean()}
                 | {port, inet:port_number()}
                 | {tcp_opts, [gen_tcp:option()]}
                 | {ssl, boolean()}
@@ -787,7 +789,6 @@ maybe_rand_id(_, ?NO_CLIENT_ID) -> random_client_id();
 maybe_rand_id(_, ID) -> ID.
 
 random_client_id() ->
-    _ = rand:seed(exsplus, erlang:timestamp()),
     I1 = rand:uniform(round(math:pow(2, 48))) - 1,
     I2 = rand:uniform(round(math:pow(2, 32))) - 1,
     {ok, Host} = inet:gethostname(),
@@ -808,13 +809,14 @@ init([{host, Host} | Opts], State) ->
 init([{port, Port} | Opts], State) ->
     init(Opts, State#state{port = Port});
 init([{hosts, Hosts} | Opts], State) ->
-    Hosts1 =
-    lists:foldl(fun({Host, Port}, Acc) ->
-                    [{Host, Port}|Acc];
-                   (Host, Acc) ->
-                    [{Host, 1883}|Acc]
-                end, [], Hosts),
+    %% Keep the configured order: the list is tried head-first.
+    Hosts1 = lists:map(fun({Host, Port}) -> {Host, Port};
+                          (Host) -> {Host, 1883}
+                       end, Hosts),
     init(Opts, State#state{hosts = Hosts1});
+init([{shuffle_hosts, true} | Opts], State = #state{extra = Extra}) ->
+    %% save only non-default value to keep client's default state footprint small
+    init(Opts, State#state{extra = Extra#{shuffle_hosts => true}});
 init([{tcp_opts, TcpOpts} | Opts], State = #state{sock_opts = SockOpts}) ->
     init(Opts, State#state{sock_opts = merge_opts(SockOpts, TcpOpts)});
 init([{quic_opts, {_ConnOpts, _StreamOpts}} = QuicOpts | Opts], State = #state{sock_opts = SockOpts}) ->
@@ -2283,10 +2285,23 @@ sock_connect(ConnMod, [{Host, Port} | Hosts], SockOpts, Timeout, _LastErr) ->
             sock_connect(ConnMod, Hosts, SockOpts, Timeout, Error)
     end.
 
+%% The list of `{Host, Port}' pairs to try, head first.
+%% Called on every connect attempt (initial connect and each reconnect),
+%% so with `shuffle_hosts' each attempt gets a fresh random order.
 hosts(#state{hosts = [], host = Host, port = Port}) ->
     [{host(Host), Port}];
-hosts(#state{hosts = Hosts}) ->
-    [{host(Host), Port} || {Host, Port} <- Hosts].
+hosts(#state{hosts = Hosts, extra = Extra}) ->
+    Hosts1 = [{host(Host), Port} || {Host, Port} <- Hosts],
+    case maps:get(shuffle_hosts, Extra, false) of
+        true -> shuffle(Hosts1);
+        false -> Hosts1
+    end.
+
+%% `rand:uniform/0' seeds the process on first use; no explicit seeding,
+%% and no time-based seed, so clients started in the same instant do not
+%% all pick the same order.
+shuffle(List) ->
+    [X || {_, X} <- lists:keysort(1, [{rand:uniform(), X} || X <- List])].
 
 host(Bin) when is_binary(Bin) -> binary_to_list(Bin);
 host(Host) -> Host.
