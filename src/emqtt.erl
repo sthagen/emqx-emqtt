@@ -159,6 +159,7 @@
                 | {ssl_opts, [ssl:tls_client_option()]}
                 | {quic_opts, {_, _}}
                 | {ws_path, string()}
+                | {ws_upgrade_options, [{atom(), term()}]}
                 | {connect_timeout, pos_integer()}
                 | {bridge_mode, boolean()}
                 | {clientid, iodata()}
@@ -845,6 +846,8 @@ init([{ws_transport_options, TransportOptions} | Opts], State = #state{sock_opts
     init(Opts, State#state{sock_opts = [{ws_transport_options, TransportOptions}|SockOpts]});
 init([{ws_headers, Headers} | Opts], State = #state{sock_opts = SockOpts}) ->
     init(Opts, State#state{sock_opts = [{ws_headers, Headers}|SockOpts]});
+init([{ws_upgrade_options, WsUpgradeOptions} | Opts], State = #state{sock_opts = SockOpts}) ->
+    init(Opts, State#state{sock_opts = [{ws_upgrade_options, WsUpgradeOptions}|SockOpts]});
 init([{clientid, ClientId} | Opts], State) ->
     init(Opts, State#state{clientid = iolist_to_binary(ClientId)});
 init([{clean_start, CleanStart} | Opts], State) when is_boolean(CleanStart) ->
