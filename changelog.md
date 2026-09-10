@@ -1,5 +1,9 @@
 # 1.16.1
 
+- feat: add the `ws_upgrade_options` option. The proplist is merged into the
+  gun WebSocket upgrade options, so it can set limits gun does not expose
+  otherwise (for example `max_frame_size`) and override the defaults
+  (for example `compress`).
 - build: require OTP 27 or newer. The minimum was 26, but cowlib 2.20.0 uses the
   `maybe` expression, which OTP 26 cannot parse without a feature flag, so the
   build fails on 26. macOS packages are now built on OTP 27 and 28.
