@@ -70,23 +70,18 @@ jobs:
           run: |
             # See https://github.com/actions/setup-python/issues/577
             # brew update
-            # Homebrew currently has no erlang@28 formula; the unversioned
-            # erlang formula tracks the latest stable (OTP 28.x).
-            if [ "${{ matrix.otp }}" = "28" ]; then
-              erlang_formula=erlang
-              erlang_opt=erlang
-            else
-              erlang_formula=erlang@${{ matrix.otp }}
-              erlang_opt=erlang@${{ matrix.otp }}
-            fi
+            # Use the versioned formula for every OTP release. The unversioned
+            # erlang formula tracks the latest stable release, not the matrix
+            # version.
+            erlang_formula=erlang@${{ matrix.otp }}
             brew install curl zip unzip gnu-sed "${erlang_formula}" coreutils
-            echo "$(brew --prefix)/opt/${erlang_opt}/bin" >> $GITHUB_PATH
+            echo "$(brew --prefix)/opt/${erlang_formula}/bin" >> $GITHUB_PATH
             echo "$(brew --prefix)/opt/unzip/bin" >> $GITHUB_PATH
             echo "$(brew --prefix)/bin" >> $GITHUB_PATH
         - name: build
           run: |
             echo "${PATH}"
-            erl -noshell -eval 'io:format(erlang:system_info(otp_release)), halt(0).'
+            erl -noshell -eval 'io:format("~s~n", [erlang:system_info(otp_release)]), halt(0).'
             .github/workflows/script/build.sh
             pkg=emqtt-macos-$(git describe --tags --always).zip
             openssl dgst -sha256 _packages/$pkg | awk '{print $2}' > _packages/$pkg.sha256
