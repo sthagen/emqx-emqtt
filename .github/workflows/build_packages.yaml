@@ -29,7 +29,7 @@ jobs:
                 - amzn2023
 
         steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
           with:
             fetch-depth: 0
         - name: build emqx packages
@@ -65,7 +65,7 @@ jobs:
               - 28
 
         steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
         - name: prepare
           run: |
             # See https://github.com/actions/setup-python/issues/577
@@ -103,7 +103,7 @@ jobs:
         if: ${{ github.event_name == 'release' }}
 
         steps:
-        - uses: actions/checkout@v3
+        - uses: actions/checkout@v4
         - uses: actions/download-artifact@v3
           with:
             name: packages
