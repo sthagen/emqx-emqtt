@@ -1,3 +1,9 @@
+# 1.16.1
+
+- build: require OTP 27 or newer. The minimum was 26, but cowlib 2.20.0 uses the
+  `maybe` expression, which OTP 26 cannot parse without a feature flag, so the
+  build fails on 26. macOS packages are now built on OTP 27 and 28.
+
 # 1.16.0
 
 - feat: add the `shuffle_hosts` option. When `true`, the `hosts` list is
