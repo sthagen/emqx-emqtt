@@ -109,6 +109,8 @@ groups() ->
        t_shuffle_hosts_disabled,
        t_shuffle_hosts_failover,
        t_shuffle_hosts_single,
+       t_ws_upgrade_options_default,
+       t_ws_upgrade_options_custom,
        t_connected,
        t_qos2_flow_autoack_never,
        t_ssl_error_client_reject_server,
@@ -1457,6 +1459,31 @@ t_shuffle_hosts_single(_Config) ->
     {ok, _} = emqtt:connect(C2),
     ok = emqtt:disconnect(C2).
 
+%% With no `ws_upgrade_options', `emqtt_ws:connect/4' passes the default
+%% gun ws options through unchanged.
+t_ws_upgrade_options_default(_Config) ->
+    ok = mock_gun_ws_upgrade(),
+    {ok, {_, _}} = emqtt_ws:connect("127.0.0.1", 8083, [], 1000),
+    ?assertEqual(#{compress => false,
+                    protocols => [{<<"mqtt">>, gun_ws_h}]},
+                 collect_ws_upgrade_opts()),
+    ok.
+
+%% `ws_upgrade_options' are merged into the default gun ws options, and can
+%% both add new options (e.g. `max_frame_size') and override defaults
+%% (e.g. `compress').
+t_ws_upgrade_options_custom(_Config) ->
+    ok = mock_gun_ws_upgrade(),
+    {ok, {_, _}} = emqtt_ws:connect("127.0.0.1", 8083,
+                                    [{ws_upgrade_options,
+                                      [{max_frame_size, 100000},
+                                       {compress, true}]}], 1000),
+    ?assertEqual(#{compress => true,
+                    protocols => [{<<"mqtt">>, gun_ws_h}],
+                    max_frame_size => 100000},
+                 collect_ws_upgrade_opts()),
+    ok.
+
 t_initialized(_) ->
     error('TODO').
 
@@ -1949,6 +1976,31 @@ collect_connect_attempts() ->
 
 conn_mod(quic_connect) -> emqtt_quic;
 conn_mod(connect) -> emqtt_sock.
+
+%% Mock `gun:open/3', `gun:await_up/2' and `gun:ws_upgrade/4' so that
+%% `emqtt_ws:connect/4' completes without a real connection, reporting the
+%% `WsOpts' passed to `ws_upgrade/4' to the test process.
+mock_gun_ws_upgrade() ->
+    Self = self(),
+    meck:new(gun, [passthrough, no_history]),
+    meck:expect(gun, open, fun(_Host, _Port, _Opts) -> {ok, self()} end),
+    meck:expect(gun, await_up, fun(_ConnPid, _Timeout) -> {ok, http} end),
+    meck:expect(gun, ws_upgrade,
+                fun(ConnPid, _Path, _Headers, WsOpts) ->
+                        StreamRef = make_ref(),
+                        Self ! {ws_upgrade_opts, WsOpts},
+                        ConnPid ! {gun_upgrade, ConnPid, StreamRef, [<<"websocket">>], []},
+                        StreamRef
+                end),
+    ok.
+
+%% Return the `WsOpts' map recorded by `mock_gun_ws_upgrade/0'.
+collect_ws_upgrade_opts() ->
+    receive
+        {ws_upgrade_opts, WsOpts} -> WsOpts
+    after 0 ->
+        undefined
+    end.
 
 %% A TCP port nothing listens on.
 unused_port() ->

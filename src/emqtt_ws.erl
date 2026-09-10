@@ -25,7 +25,8 @@
         , getstat/2
         ]).
 
--type option() :: {ws_path, string()}.
+-type option() :: {ws_path, string()}
+                 | {ws_upgrade_options, [{atom(), term()}]}.
 -type connection() :: {_Conn :: pid(), gun:stream_ref()}.
 
 -export_type([option/0, connection/0]).
@@ -68,7 +69,9 @@ upgrade(ConnPid, Opts, Timeout) ->
     %% 2. websocket upgrade
     Path = proplists:get_value(ws_path, Opts, "/mqtt"),
     CustomHeaders = proplists:get_value(ws_headers, Opts, []),
-    StreamRef = gun:ws_upgrade(ConnPid, Path, ?WS_HEADERS ++ CustomHeaders, ?WS_OPTS),
+    UpgradeOptions = proplists:get_value(ws_upgrade_options, Opts, []),
+    WsOpts = maps:merge(?WS_OPTS, maps:from_list(UpgradeOptions)),
+    StreamRef = gun:ws_upgrade(ConnPid, Path, ?WS_HEADERS ++ CustomHeaders, WsOpts),
     receive
         {gun_upgrade, ConnPid, StreamRef, [<<"websocket">>], _Headers} ->
             {ok, StreamRef};
